@@ -1,0 +1,6 @@
+apiVersion: rbac-controller.pliu.github.com/v1alpha1
+kind: PermissionedRole
+metadata:
+  name: permissionedrole-sample
+spec:
+  # Add fields here
