@@ -1,0 +1,12 @@
+apiVersion: rbac.pliu.github.com.pliu.github.com/v1alpha1
+kind: PermissionedRole
+metadata:
+  labels:
+    app.kubernetes.io/name: permissionedrole
+    app.kubernetes.io/instance: permissionedrole-sample
+    app.kubernetes.io/part-of: rbac-controller
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: rbac-controller
+  name: permissionedrole-sample
+spec:
+  # TODO(user): Add fields here

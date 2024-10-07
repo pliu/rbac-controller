@@ -1,0 +1,5 @@
+## Append samples you want in your CSV to this file as resources ##
+resources:
+- rbac.pliu.github.com_v1alpha1_permissionedrole.yaml
+- rbac.pliu.github.com_v1alpha1_permissionedclusterrole.yaml
+#+kubebuilder:scaffold:manifestskustomizesamples

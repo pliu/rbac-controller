@@ -1,0 +1,28 @@
+domain: pliu.github.com
+layout:
+- go.kubebuilder.io/v4-alpha
+plugins:
+  manifests.sdk.operatorframework.io/v2: {}
+  scorecard.sdk.operatorframework.io/v2: {}
+projectName: rbac-controller
+repo: github.com/pliu/rbac-controller
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: pliu.github.com
+  group: rbac.pliu.github.com
+  kind: PermissionedRole
+  path: github.com/pliu/rbac-controller/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: pliu.github.com
+  group: rbac.pliu.github.com
+  kind: PermissionedClusterRole
+  path: github.com/pliu/rbac-controller/api/v1alpha1
+  version: v1alpha1
+version: "3"

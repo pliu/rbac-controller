@@ -1,0 +1,27 @@
+# permissions for end users to view permissionedroles.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: permissionedrole-viewer-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: rbac-controller
+    app.kubernetes.io/part-of: rbac-controller
+    app.kubernetes.io/managed-by: kustomize
+  name: permissionedrole-viewer-role
+rules:
+- apiGroups:
+  - rbac.pliu.github.com.pliu.github.com
+  resources:
+  - permissionedroles
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - rbac.pliu.github.com.pliu.github.com
+  resources:
+  - permissionedroles/status
+  verbs:
+  - get

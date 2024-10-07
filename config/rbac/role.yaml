@@ -1,0 +1,42 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  creationTimestamp: null
+  name: manager-role
+rules:
+- apiGroups:
+  - rbac.pliu.github.com.pliu.github.com
+  resources:
+  - permissionedclusterroles
+  verbs:
+  - create
+  - delete
+  - patch
+  - update
+- apiGroups:
+  - rbac.pliu.github.com.pliu.github.com
+  resources:
+  - permissionedroles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - rbac.pliu.github.com.pliu.github.com
+  resources:
+  - permissionedroles/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - rbac.pliu.github.com.pliu.github.com
+  resources:
+  - permissionedroles/status
+  verbs:
+  - get
+  - patch
+  - update
