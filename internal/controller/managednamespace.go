@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -32,13 +33,17 @@ import (
 // Referenced ClusterRoles are not managed here; a missing one fails closed and
 // is reported in status.
 type ManagedNamespaceReconciler struct {
-	client.Client
-	APIReader client.Reader
+	// CachedClient is the manager's ordinary client: reads use its informer
+	// cache, while mutations are sent to the API server.
+	CachedClient client.Client
+	// LiveReader bypasses the informer cache when cleanup must be confirmed
+	// against current API-server state.
+	LiveReader client.Reader
 }
 
 func (r *ManagedNamespaceReconciler) Reconcile(ctx context.Context, q ctrl.Request) (ctrl.Result, error) {
 	var mns api.ManagedNamespace
-	if e := r.Get(ctx, q.NamespacedName, &mns); e != nil {
+	if e := r.CachedClient.Get(ctx, q.NamespacedName, &mns); e != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(e)
 	}
 	if !mns.DeletionTimestamp.IsZero() {
@@ -53,16 +58,12 @@ func (r *ManagedNamespaceReconciler) Reconcile(ctx context.Context, q ctrl.Reque
 		invalidReferences.DeleteLabelValues("managednamespace", mns.Name)
 		base := mns.DeepCopy()
 		controllerutil.RemoveFinalizer(&mns, core.Finalizer)
-		return ctrl.Result{}, r.Patch(ctx, &mns, client.MergeFrom(base))
+		return ctrl.Result{}, r.CachedClient.Patch(ctx, &mns, client.MergeFrom(base))
 	}
-	if mns.Labels[core.LabelManagedBy] != core.ManagedBy || !controllerutil.ContainsFinalizer(&mns, core.Finalizer) {
+	if !controllerutil.ContainsFinalizer(&mns, core.Finalizer) {
 		base := mns.DeepCopy()
-		if mns.Labels == nil {
-			mns.Labels = map[string]string{}
-		}
-		mns.Labels[core.LabelManagedBy] = core.ManagedBy
 		controllerutil.AddFinalizer(&mns, core.Finalizer)
-		return ctrl.Result{Requeue: true}, r.Patch(ctx, &mns, client.MergeFrom(base))
+		return ctrl.Result{Requeue: true}, r.CachedClient.Patch(ctx, &mns, client.MergeFrom(base))
 	}
 
 	invalid, syncErr := r.sync(ctx, &mns)
@@ -81,7 +82,7 @@ func (r *ManagedNamespaceReconciler) Reconcile(ctx context.Context, q ctrl.Reque
 // grant permanently.
 func (r *ManagedNamespaceReconciler) finalizeBindings(ctx context.Context, mns *api.ManagedNamespace) (bool, error) {
 	var list rbacv1.RoleBindingList
-	if e := cleanupReader(r.Client, r.APIReader).List(ctx, &list, r.ownedBy(mns)...); e != nil {
+	if e := r.LiveReader.List(ctx, &list, r.ownedBy(mns)...); e != nil {
 		return false, e
 	}
 	if len(list.Items) == 0 {
@@ -91,7 +92,7 @@ func (r *ManagedNamespaceReconciler) finalizeBindings(ctx context.Context, mns *
 		if !list.Items[i].DeletionTimestamp.IsZero() {
 			continue
 		}
-		if e := client.IgnoreNotFound(r.Delete(ctx, &list.Items[i])); e != nil {
+		if e := client.IgnoreNotFound(r.CachedClient.Delete(ctx, &list.Items[i])); e != nil {
 			return false, e
 		}
 	}
@@ -110,7 +111,7 @@ func (r *ManagedNamespaceReconciler) sync(ctx context.Context, mns *api.ManagedN
 
 func (r *ManagedNamespaceReconciler) ensureNamespace(ctx context.Context, mns *api.ManagedNamespace) error {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: mns.Name}}
-	_, e := controllerutil.CreateOrUpdate(ctx, r.Client, ns, func() error {
+	_, e := controllerutil.CreateOrUpdate(ctx, r.CachedClient, ns, func() error {
 		previous, e := namespaceMetadataInventory(ns)
 		if e != nil {
 			return e
@@ -174,11 +175,12 @@ func (r *ManagedNamespaceReconciler) reconcileQuota(ctx context.Context, mns *ap
 	for i := range mns.Spec.ResourceQuotas {
 		q := &mns.Spec.ResourceQuotas[i]
 		if q.Name == "" {
+			log.FromContext(ctx).Error(errors.New("resource quota name is empty"), "Skipping resource quota that should have been rejected by CRD validation", "managedNamespace", mns.Name, "index", i)
 			continue
 		}
 		want[q.Name] = true
 		rq := &corev1.ResourceQuota{ObjectMeta: metav1.ObjectMeta{Name: q.Name, Namespace: mns.Name}}
-		if _, e := controllerutil.CreateOrUpdate(ctx, r.Client, rq, func() error {
+		if _, e := controllerutil.CreateOrUpdate(ctx, r.CachedClient, rq, func() error {
 			rq.Labels = ownerLabels(mns.Name)
 			q.ResourceQuotaSpec.DeepCopyInto(&rq.Spec)
 			return nil
@@ -198,7 +200,7 @@ func (r *ManagedNamespaceReconciler) reconcileQuota(ctx context.Context, mns *ap
 // somewhere else wearing these labels is not this owner's to delete.
 func (r *ManagedNamespaceReconciler) pruneQuotas(ctx context.Context, mns *api.ManagedNamespace, want map[string]bool) error {
 	var list corev1.ResourceQuotaList
-	if e := r.List(ctx, &list, client.InNamespace(mns.Name), client.MatchingLabels{
+	if e := r.CachedClient.List(ctx, &list, client.InNamespace(mns.Name), client.MatchingLabels{
 		core.LabelManagedBy: core.ManagedBy,
 		core.LabelOwnerName: mns.Name,
 	}); e != nil {
@@ -207,7 +209,7 @@ func (r *ManagedNamespaceReconciler) pruneQuotas(ctx context.Context, mns *api.M
 	for i := range list.Items {
 		it := &list.Items[i]
 		if !want[it.Name] {
-			if e := client.IgnoreNotFound(r.Delete(ctx, it)); e != nil {
+			if e := client.IgnoreNotFound(r.CachedClient.Delete(ctx, it)); e != nil {
 				return e
 			}
 		}
@@ -218,15 +220,24 @@ func (r *ManagedNamespaceReconciler) pruneQuotas(ctx context.Context, mns *api.M
 func (r *ManagedNamespaceReconciler) reconcileBindings(ctx context.Context, mns *api.ManagedNamespace) ([]api.InvalidReference, error) {
 	invalid := []api.InvalidReference{}
 	want := map[types.NamespacedName]bool{}
-	for _, am := range mns.Spec.AccessMappings {
+	for i, am := range mns.Spec.AccessMappings {
 		subjects := subjectsFor(am)
+		valid := true
 		if len(subjects) == 0 {
+			log.FromContext(ctx).Error(errors.New("access mapping has no subjects"), "Skipping access mapping that should have been rejected by CRD validation", "managedNamespace", mns.Name, "index", i)
+			valid = false
+		}
+		if len(am.ClusterRoles) == 0 {
+			log.FromContext(ctx).Error(errors.New("access mapping has no cluster roles"), "Skipping access mapping that should have been rejected by CRD validation", "managedNamespace", mns.Name, "index", i)
+			valid = false
+		}
+		if !valid {
 			continue
 		}
 		key := subjectKey(am)
 		for _, role := range am.ClusterRoles {
 			var cr rbacv1.ClusterRole
-			if e := r.Get(ctx, client.ObjectKey{Name: role}, &cr); e != nil {
+			if e := r.CachedClient.Get(ctx, client.ObjectKey{Name: role}, &cr); e != nil {
 				if !apierrors.IsNotFound(e) {
 					return nil, e
 				}
@@ -254,13 +265,13 @@ func (r *ManagedNamespaceReconciler) ensureRoleBinding(ctx context.Context, mns 
 	// mapping's ClusterRole yields a different object and this cannot be reached
 	// through the spec; it is here for a name that something else already took,
 	// and to keep working if the role ever leaves the hash. Not dead code.
-	if e := r.Get(ctx, client.ObjectKeyFromObject(obj), obj); e == nil && obj.RoleRef != want {
-		if e = r.Delete(ctx, obj); e != nil {
+	if e := r.CachedClient.Get(ctx, client.ObjectKeyFromObject(obj), obj); e == nil && obj.RoleRef != want {
+		if e = r.CachedClient.Delete(ctx, obj); e != nil {
 			return e
 		}
 		obj = &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: mns.Name}}
 	}
-	_, e := controllerutil.CreateOrUpdate(ctx, r.Client, obj, func() error {
+	_, e := controllerutil.CreateOrUpdate(ctx, r.CachedClient, obj, func() error {
 		obj.Labels = ownerLabels(mns.Name)
 		obj.RoleRef = want
 		obj.Subjects = subjects
@@ -273,12 +284,12 @@ func (r *ManagedNamespaceReconciler) ensureRoleBinding(ctx context.Context, mns 
 // owned bindings.
 func (r *ManagedNamespaceReconciler) pruneBindings(ctx context.Context, mns *api.ManagedNamespace, want map[types.NamespacedName]bool) error {
 	var list rbacv1.RoleBindingList
-	if e := r.List(ctx, &list, r.ownedBy(mns)...); e != nil {
+	if e := r.CachedClient.List(ctx, &list, r.ownedBy(mns)...); e != nil {
 		return e
 	}
 	for i := range list.Items {
 		if want == nil || !want[client.ObjectKeyFromObject(&list.Items[i])] {
-			if e := client.IgnoreNotFound(r.Delete(ctx, &list.Items[i])); e != nil {
+			if e := client.IgnoreNotFound(r.CachedClient.Delete(ctx, &list.Items[i])); e != nil {
 				return e
 			}
 		}
@@ -306,7 +317,7 @@ func (r *ManagedNamespaceReconciler) status(ctx context.Context, mns *api.Manage
 		mns.Status.InvalidReferences = invalid
 	}
 	meta.SetStatusCondition(&mns.Status.Conditions, metav1.Condition{Type: "Ready", Status: status, Reason: reason, Message: message, ObservedGeneration: mns.Generation})
-	return r.Status().Patch(ctx, mns, client.MergeFrom(base))
+	return r.CachedClient.Status().Patch(ctx, mns, client.MergeFrom(base))
 }
 
 // ownedBy selects this ManagedNamespace's generated objects. It matches on
@@ -329,9 +340,10 @@ func (r *ManagedNamespaceReconciler) ownedBy(mns *api.ManagedNamespace) []client
 	}
 }
 
-func (r *ManagedNamespaceReconciler) all(ctx context.Context, _ client.Object) []reconcile.Request {
+func (r *ManagedNamespaceReconciler) all(ctx context.Context, obj client.Object) []reconcile.Request {
 	var l api.ManagedNamespaceList
-	if r.List(ctx, &l) != nil {
+	if e := r.CachedClient.List(ctx, &l); e != nil {
+		log.FromContext(ctx).Error(e, "Unable to list ManagedNamespaces while enqueueing ClusterRole dependents", "clusterRole", obj.GetName())
 		return nil
 	}
 	o := make([]reconcile.Request, 0, len(l.Items))

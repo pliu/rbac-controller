@@ -30,7 +30,6 @@ func managedNamespaceWith(name string, mappings ...api.AccessMapping) *api.Manag
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       name,
 			Finalizers: []string{core.Finalizer},
-			Labels:     map[string]string{core.LabelManagedBy: core.ManagedBy},
 		},
 		Spec: api.ManagedNamespaceSpec{AccessMappings: mappings},
 	}
@@ -61,7 +60,7 @@ func TestReorderedUserMappingsReachAQuietSteadyState(t *testing.T) {
 				return c.Update(ctx, obj, opts...)
 			},
 		}).Build()
-	r := &ManagedNamespaceReconciler{Client: cl}
+	r := &ManagedNamespaceReconciler{CachedClient: cl, LiveReader: cl}
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mns)}
 
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
@@ -99,7 +98,7 @@ func TestDuplicateUsersCollapseToOneSubject(t *testing.T) {
 
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(mns, ns, role).WithStatusSubresource(mns).Build()
-	r := &ManagedNamespaceReconciler{Client: cl}
+	r := &ManagedNamespaceReconciler{CachedClient: cl, LiveReader: cl}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mns)}); err != nil {
 		t.Fatal(err)

@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -23,13 +24,17 @@ import (
 // of ClusterRoles. Referenced ClusterRoles are not managed here; a missing one
 // fails closed and is reported in status.
 type ClusterAccessReconciler struct {
-	client.Client
-	APIReader client.Reader
+	// CachedClient is the manager's ordinary client: reads use its informer
+	// cache, while mutations are sent to the API server.
+	CachedClient client.Client
+	// LiveReader bypasses the informer cache when cleanup must be confirmed
+	// against current API-server state.
+	LiveReader client.Reader
 }
 
 func (r *ClusterAccessReconciler) Reconcile(ctx context.Context, q ctrl.Request) (ctrl.Result, error) {
 	var cam api.ClusterAccessMapping
-	if e := r.Get(ctx, q.NamespacedName, &cam); e != nil {
+	if e := r.CachedClient.Get(ctx, q.NamespacedName, &cam); e != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(e)
 	}
 	if !cam.DeletionTimestamp.IsZero() {
@@ -43,16 +48,12 @@ func (r *ClusterAccessReconciler) Reconcile(ctx context.Context, q ctrl.Request)
 		invalidReferences.DeleteLabelValues("clusteraccessmapping", cam.Name)
 		base := cam.DeepCopy()
 		controllerutil.RemoveFinalizer(&cam, core.Finalizer)
-		return ctrl.Result{}, r.Patch(ctx, &cam, client.MergeFrom(base))
+		return ctrl.Result{}, r.CachedClient.Patch(ctx, &cam, client.MergeFrom(base))
 	}
-	if cam.Labels[core.LabelManagedBy] != core.ManagedBy || !controllerutil.ContainsFinalizer(&cam, core.Finalizer) {
+	if !controllerutil.ContainsFinalizer(&cam, core.Finalizer) {
 		base := cam.DeepCopy()
-		if cam.Labels == nil {
-			cam.Labels = map[string]string{}
-		}
-		cam.Labels[core.LabelManagedBy] = core.ManagedBy
 		controllerutil.AddFinalizer(&cam, core.Finalizer)
-		return ctrl.Result{Requeue: true}, r.Patch(ctx, &cam, client.MergeFrom(base))
+		return ctrl.Result{Requeue: true}, r.CachedClient.Patch(ctx, &cam, client.MergeFrom(base))
 	}
 
 	invalid, syncErr := r.sync(ctx, &cam)
@@ -69,7 +70,7 @@ func (r *ClusterAccessReconciler) Reconcile(ctx context.Context, q ctrl.Request)
 // to confirm that every grant is actually gone.
 func (r *ClusterAccessReconciler) finalizeBindings(ctx context.Context, cam *api.ClusterAccessMapping) (bool, error) {
 	var list rbacv1.ClusterRoleBindingList
-	if e := cleanupReader(r.Client, r.APIReader).List(ctx, &list, client.MatchingLabels{
+	if e := r.LiveReader.List(ctx, &list, client.MatchingLabels{
 		core.LabelManagedBy: core.ManagedBy,
 		core.LabelOwnerName: cam.Name,
 	}); e != nil {
@@ -82,7 +83,7 @@ func (r *ClusterAccessReconciler) finalizeBindings(ctx context.Context, cam *api
 		if !list.Items[i].DeletionTimestamp.IsZero() {
 			continue
 		}
-		if e := client.IgnoreNotFound(r.Delete(ctx, &list.Items[i])); e != nil {
+		if e := client.IgnoreNotFound(r.CachedClient.Delete(ctx, &list.Items[i])); e != nil {
 			return false, e
 		}
 	}
@@ -93,11 +94,20 @@ func (r *ClusterAccessReconciler) sync(ctx context.Context, cam *api.ClusterAcce
 	subjects := subjectsFor(cam.Spec)
 	invalid := []api.InvalidReference{}
 	want := map[string]bool{}
-	if len(subjects) > 0 {
+	valid := true
+	if len(subjects) == 0 {
+		log.FromContext(ctx).Error(errors.New("access mapping has no subjects"), "Skipping access mapping that should have been rejected by CRD validation", "clusterAccessMapping", cam.Name)
+		valid = false
+	}
+	if len(cam.Spec.ClusterRoles) == 0 {
+		log.FromContext(ctx).Error(errors.New("access mapping has no cluster roles"), "Skipping access mapping that should have been rejected by CRD validation", "clusterAccessMapping", cam.Name)
+		valid = false
+	}
+	if valid {
 		key := subjectKey(cam.Spec)
 		for _, role := range cam.Spec.ClusterRoles {
 			var cr rbacv1.ClusterRole
-			if e := r.Get(ctx, client.ObjectKey{Name: role}, &cr); e != nil {
+			if e := r.CachedClient.Get(ctx, client.ObjectKey{Name: role}, &cr); e != nil {
 				if !apierrors.IsNotFound(e) {
 					return nil, e
 				}
@@ -121,13 +131,13 @@ func (r *ClusterAccessReconciler) ensure(ctx context.Context, cam *api.ClusterAc
 	want := rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: role}
 	obj := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	// Replace rather than update, for the reason ensureRoleBinding explains.
-	if e := r.Get(ctx, client.ObjectKeyFromObject(obj), obj); e == nil && obj.RoleRef != want {
-		if e = r.Delete(ctx, obj); e != nil {
+	if e := r.CachedClient.Get(ctx, client.ObjectKeyFromObject(obj), obj); e == nil && obj.RoleRef != want {
+		if e = r.CachedClient.Delete(ctx, obj); e != nil {
 			return e
 		}
 		obj = &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	}
-	_, e := controllerutil.CreateOrUpdate(ctx, r.Client, obj, func() error {
+	_, e := controllerutil.CreateOrUpdate(ctx, r.CachedClient, obj, func() error {
 		obj.Labels = ownerLabels(cam.Name)
 		obj.RoleRef = want
 		obj.Subjects = subjects
@@ -146,12 +156,12 @@ func (r *ClusterAccessReconciler) ensure(ctx context.Context, cam *api.ClusterAc
 // wants would stay invisible here, granting access nothing references.
 func (r *ClusterAccessReconciler) prune(ctx context.Context, cam *api.ClusterAccessMapping, want map[string]bool) error {
 	var list rbacv1.ClusterRoleBindingList
-	if e := r.List(ctx, &list, client.MatchingLabels{core.LabelManagedBy: core.ManagedBy, core.LabelOwnerName: cam.Name}); e != nil {
+	if e := r.CachedClient.List(ctx, &list, client.MatchingLabels{core.LabelManagedBy: core.ManagedBy, core.LabelOwnerName: cam.Name}); e != nil {
 		return e
 	}
 	for i := range list.Items {
 		if want == nil || !want[list.Items[i].Name] {
-			if e := client.IgnoreNotFound(r.Delete(ctx, &list.Items[i])); e != nil {
+			if e := client.IgnoreNotFound(r.CachedClient.Delete(ctx, &list.Items[i])); e != nil {
 				return e
 			}
 		}
@@ -177,12 +187,13 @@ func (r *ClusterAccessReconciler) status(ctx context.Context, cam *api.ClusterAc
 		cam.Status.InvalidReferences = invalid
 	}
 	meta.SetStatusCondition(&cam.Status.Conditions, metav1.Condition{Type: "Ready", Status: status, Reason: reason, Message: message, ObservedGeneration: cam.Generation})
-	return r.Status().Patch(ctx, cam, client.MergeFrom(base))
+	return r.CachedClient.Status().Patch(ctx, cam, client.MergeFrom(base))
 }
 
-func (r *ClusterAccessReconciler) all(ctx context.Context, _ client.Object) []reconcile.Request {
+func (r *ClusterAccessReconciler) all(ctx context.Context, obj client.Object) []reconcile.Request {
 	var l api.ClusterAccessMappingList
-	if r.List(ctx, &l) != nil {
+	if e := r.CachedClient.List(ctx, &l); e != nil {
+		log.FromContext(ctx).Error(e, "Unable to list ClusterAccessMappings while enqueueing ClusterRole dependents", "clusterRole", obj.GetName())
 		return nil
 	}
 	o := make([]reconcile.Request, 0, len(l.Items))

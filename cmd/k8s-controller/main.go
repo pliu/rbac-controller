@@ -50,10 +50,10 @@ func main() {
 	if e != nil {
 		panic(e)
 	}
-	if e = (&c.ManagedNamespaceReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader()}).Setup(mgr); e != nil {
+	if e = (&c.ManagedNamespaceReconciler{CachedClient: mgr.GetClient(), LiveReader: mgr.GetAPIReader()}).Setup(mgr); e != nil {
 		panic(e)
 	}
-	if e = (&c.ClusterAccessReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader()}).Setup(mgr); e != nil {
+	if e = (&c.ClusterAccessReconciler{CachedClient: mgr.GetClient(), LiveReader: mgr.GetAPIReader()}).Setup(mgr); e != nil {
 		panic(e)
 	}
 	if serverEnabled {

@@ -47,7 +47,6 @@ func TestInvalidNamespaceNameIsReportedAndTerminal(t *testing.T) {
 		UID:        types.UID("mns-uid"),
 		Generation: 3,
 		Finalizers: []string{core.Finalizer},
-		Labels:     map[string]string{core.LabelManagedBy: core.ManagedBy},
 	}}
 	// Status from an earlier pass that did complete; a failure must not erase it.
 	mns.Status.ObservedGeneration = 2
@@ -66,7 +65,7 @@ func TestInvalidNamespaceNameIsReportedAndTerminal(t *testing.T) {
 				return c.Create(ctx, obj, opts...)
 			},
 		}).Build()
-	r := &ManagedNamespaceReconciler{Client: cl}
+	r := &ManagedNamespaceReconciler{CachedClient: cl, LiveReader: cl}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mns)})
 	if err == nil {
@@ -114,7 +113,6 @@ func TestTransientSyncFailureIsReportedButRetryable(t *testing.T) {
 			UID:        types.UID("cam-uid"),
 			Generation: 1,
 			Finalizers: []string{core.Finalizer},
-			Labels:     map[string]string{core.LabelManagedBy: core.ManagedBy},
 		},
 		Spec: api.AccessMapping{Group: "devs", ClusterRoles: []string{"edit"}},
 	}
@@ -129,7 +127,7 @@ func TestTransientSyncFailureIsReportedButRetryable(t *testing.T) {
 				return c.Create(ctx, obj, opts...)
 			},
 		}).Build()
-	r := &ClusterAccessReconciler{Client: cl}
+	r := &ClusterAccessReconciler{CachedClient: cl, LiveReader: cl}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cam)})
 	if err == nil {
@@ -163,7 +161,6 @@ func TestSuccessfulSyncClearsPriorFailure(t *testing.T) {
 			UID:        types.UID("cam-uid"),
 			Generation: 4,
 			Finalizers: []string{core.Finalizer},
-			Labels:     map[string]string{core.LabelManagedBy: core.ManagedBy},
 		},
 		Spec: api.AccessMapping{Group: "devs", ClusterRoles: []string{"edit"}},
 	}
@@ -174,7 +171,7 @@ func TestSuccessfulSyncClearsPriorFailure(t *testing.T) {
 	role := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "edit"}}
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(cam, role).
 		WithStatusSubresource(cam).Build()
-	r := &ClusterAccessReconciler{Client: cl}
+	r := &ClusterAccessReconciler{CachedClient: cl, LiveReader: cl}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cam)}); err != nil {
 		t.Fatal(err)

@@ -33,7 +33,6 @@ func TestRecreatedManagedNamespaceClearsStaleBinding(t *testing.T) {
 			Name:       name,
 			UID:        types.UID("new-uid"),
 			Finalizers: []string{core.Finalizer},
-			Labels:     map[string]string{core.LabelManagedBy: core.ManagedBy},
 		},
 		Spec: api.ManagedNamespaceSpec{AccessMappings: []api.AccessMapping{
 			{Group: "devs", ClusterRoles: []string{"edit"}},
@@ -70,7 +69,7 @@ func TestRecreatedManagedNamespaceClearsStaleBinding(t *testing.T) {
 
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(mns, ns, role, stale, kept).WithStatusSubresource(mns).Build()
-	r := &ManagedNamespaceReconciler{Client: cl}
+	r := &ManagedNamespaceReconciler{CachedClient: cl, LiveReader: cl}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mns)}); err != nil {
 		t.Fatal(err)
@@ -96,6 +95,36 @@ func TestRecreatedManagedNamespaceClearsStaleBinding(t *testing.T) {
 
 // The same invariant for cluster-wide grants, where a leaked binding is worse:
 // it grants across every namespace.
+func TestClusterAccessInitializationAddsOnlyFinalizer(t *testing.T) {
+	cam := &api.ClusterAccessMapping{ObjectMeta: metav1.ObjectMeta{
+		Name:   "devs",
+		Labels: map[string]string{"owner": "platform"},
+	}}
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(cam).Build()
+	r := &ClusterAccessReconciler{CachedClient: cl, LiveReader: cl}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cam)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Requeue {
+		t.Fatal("initialization did not requeue after persisting the finalizer")
+	}
+	var got api.ClusterAccessMapping
+	if err := cl.Get(context.Background(), client.ObjectKeyFromObject(cam), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !controllerutil.ContainsFinalizer(&got, core.Finalizer) {
+		t.Error("finalizer was not added")
+	}
+	if _, ok := got.Labels[core.LabelManagedBy]; ok {
+		t.Errorf("ClusterAccessMapping was given a %q label", core.LabelManagedBy)
+	}
+	if got.Labels["owner"] != "platform" {
+		t.Errorf("existing labels were not preserved: %#v", got.Labels)
+	}
+}
+
 func TestRecreatedClusterAccessMappingClearsStaleBinding(t *testing.T) {
 	name := "devs"
 	cam := &api.ClusterAccessMapping{
@@ -103,7 +132,6 @@ func TestRecreatedClusterAccessMappingClearsStaleBinding(t *testing.T) {
 			Name:       name,
 			UID:        types.UID("new-uid"),
 			Finalizers: []string{core.Finalizer},
-			Labels:     map[string]string{core.LabelManagedBy: core.ManagedBy},
 		},
 		Spec: api.AccessMapping{Group: "devs", ClusterRoles: []string{"edit"}},
 	}
@@ -121,7 +149,7 @@ func TestRecreatedClusterAccessMappingClearsStaleBinding(t *testing.T) {
 
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(cam, role, stale).WithStatusSubresource(cam).Build()
-	r := &ClusterAccessReconciler{Client: cl}
+	r := &ClusterAccessReconciler{CachedClient: cl, LiveReader: cl}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cam)}); err != nil {
 		t.Fatal(err)
@@ -163,7 +191,7 @@ func TestDeletionClearsBindingsFromAPreviousInstance(t *testing.T) {
 	}
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(mns, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}, stale).Build()
-	r := &ManagedNamespaceReconciler{Client: cl}
+	r := &ManagedNamespaceReconciler{CachedClient: cl, LiveReader: cl}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mns)}); err != nil {
 		t.Fatal(err)
@@ -204,7 +232,7 @@ func TestManagedNamespaceFinalizerUsesLiveReaderAndWaitsForDeletion(t *testing.T
 			return c.List(ctx, list, opts...)
 		},
 	})
-	r := &ManagedNamespaceReconciler{Client: cached, APIReader: live}
+	r := &ManagedNamespaceReconciler{CachedClient: cached, LiveReader: live}
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mns)}
 
 	result, err := r.Reconcile(context.Background(), req)
@@ -282,7 +310,7 @@ func TestClusterAccessFinalizerUsesLiveReader(t *testing.T) {
 			return c.List(ctx, list, opts...)
 		},
 	})
-	r := &ClusterAccessReconciler{Client: cached, APIReader: live}
+	r := &ClusterAccessReconciler{CachedClient: cached, LiveReader: live}
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(cam)}
 
 	result, err := r.Reconcile(context.Background(), req)

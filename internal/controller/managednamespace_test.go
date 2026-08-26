@@ -18,7 +18,38 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
+
+func TestManagedNamespaceInitializationAddsOnlyFinalizer(t *testing.T) {
+	mns := &api.ManagedNamespace{ObjectMeta: metav1.ObjectMeta{
+		Name:   "team-a",
+		Labels: map[string]string{"owner": "platform"},
+	}}
+	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(mns).Build()
+	r := &ManagedNamespaceReconciler{CachedClient: cl, LiveReader: cl}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mns)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Requeue {
+		t.Fatal("initialization did not requeue after persisting the finalizer")
+	}
+	var got api.ManagedNamespace
+	if err := cl.Get(context.Background(), client.ObjectKeyFromObject(mns), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !controllerutil.ContainsFinalizer(&got, core.Finalizer) {
+		t.Error("finalizer was not added")
+	}
+	if _, ok := got.Labels[core.LabelManagedBy]; ok {
+		t.Errorf("ManagedNamespace was given a %q label", core.LabelManagedBy)
+	}
+	if got.Labels["owner"] != "platform" {
+		t.Errorf("existing labels were not preserved: %#v", got.Labels)
+	}
+}
 
 func TestManagedNamespaceMetadataStaysInSync(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -47,7 +78,7 @@ func TestManagedNamespaceMetadataStaysInSync(t *testing.T) {
 		},
 	}}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ns).Build()
-	r := &ManagedNamespaceReconciler{Client: cl}
+	r := &ManagedNamespaceReconciler{CachedClient: cl, LiveReader: cl}
 	ctx := context.Background()
 
 	if err := r.ensureNamespace(ctx, mns); err != nil {
@@ -195,7 +226,7 @@ func TestManagedNamespaceDeletionRetainsNamespaceAndQuota(t *testing.T) {
 		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "edit"},
 	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mns, ns, quota, binding).Build()
-	r := &ManagedNamespaceReconciler{Client: cl}
+	r := &ManagedNamespaceReconciler{CachedClient: cl, LiveReader: cl}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mns)}); err != nil {
 		t.Fatal(err)
@@ -230,7 +261,6 @@ func TestManagedNamespaceRecreateWithoutQuotaClearsStaleQuota(t *testing.T) {
 		Name:       name,
 		UID:        types.UID("new-uid"),
 		Finalizers: []string{core.Finalizer},
-		Labels:     map[string]string{core.LabelManagedBy: core.ManagedBy},
 	}}
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: name,
@@ -254,7 +284,7 @@ func TestManagedNamespaceRecreateWithoutQuotaClearsStaleQuota(t *testing.T) {
 	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mns, ns, staleQuota).
 		WithStatusSubresource(mns).Build()
-	r := &ManagedNamespaceReconciler{Client: cl}
+	r := &ManagedNamespaceReconciler{CachedClient: cl, LiveReader: cl}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mns)}); err != nil {
 		t.Fatal(err)
@@ -285,7 +315,6 @@ func TestManagedNamespaceReconcilesMultipleQuotas(t *testing.T) {
 		Name:       name,
 		UID:        types.UID("mns-uid"),
 		Finalizers: []string{core.Finalizer},
-		Labels:     map[string]string{core.LabelManagedBy: core.ManagedBy},
 	}, Spec: api.ManagedNamespaceSpec{
 		ResourceQuotas: []api.ResourceQuota{
 			{
@@ -313,7 +342,7 @@ func TestManagedNamespaceReconcilesMultipleQuotas(t *testing.T) {
 	}}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mns, ns).
 		WithStatusSubresource(mns).Build()
-	r := &ManagedNamespaceReconciler{Client: cl}
+	r := &ManagedNamespaceReconciler{CachedClient: cl, LiveReader: cl}
 	ctx := context.Background()
 
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mns)}); err != nil {
@@ -382,7 +411,6 @@ func TestManagedNamespacePrunesOnlyItsOwnNamespace(t *testing.T) {
 	mns := &api.ManagedNamespace{ObjectMeta: metav1.ObjectMeta{
 		Name:       name,
 		Finalizers: []string{core.Finalizer},
-		Labels:     map[string]string{core.LabelManagedBy: core.ManagedBy},
 	}}
 	// Nothing ties these to team-a but the labels, and they sit in a namespace
 	// it does not manage. An empty spec is the worst case: the owner wants no
@@ -400,7 +428,7 @@ func TestManagedNamespacePrunesOnlyItsOwnNamespace(t *testing.T) {
 	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mns, quota, binding).
 		WithStatusSubresource(mns).Build()
-	r := &ManagedNamespaceReconciler{Client: cl}
+	r := &ManagedNamespaceReconciler{CachedClient: cl, LiveReader: cl}
 	ctx := context.Background()
 
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(mns)}); err != nil {

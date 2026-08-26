@@ -63,17 +63,6 @@ func ownerLabels(name string) map[string]string {
 	return map[string]string{core.LabelManagedBy: core.ManagedBy, core.LabelOwnerName: name}
 }
 
-// cleanupReader returns the uncached reader used to prove that binding cleanup
-// has completed. Tests and embedders that do not provide one retain the old
-// client-only behavior, while the production manager always supplies its
-// APIReader.
-func cleanupReader(c client.Client, direct client.Reader) client.Reader {
-	if direct != nil {
-		return direct
-	}
-	return c
-}
-
 // terminal marks the errors that retrying cannot fix. An Invalid response means
 // the API server rejected the object this spec asks for, so the same spec will
 // be rejected identically forever; controller-runtime counts it in
