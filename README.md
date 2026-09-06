@@ -30,10 +30,18 @@ keeps three things in sync:
   with the group or users as `User`/`Group` subjects bound directly, so
   Kubernetes evaluates them against the authenticated identity on every request.
 
+Bindings removed from the spec are pruned before namespace, quota, or new
+binding writes, so failures in those operations do not block access revocation.
+If a user set changes, its old binding is removed first; users retained in that
+mapping regain access when the replacement binding can be created.
+
 For cluster-wide grants, a `ClusterAccessMapping` is a cluster-scoped resource
 whose spec is the same access mapping (a single **group** or a list of **users**
 → ClusterRoles). The operator reconciles one `ClusterRoleBinding` per referenced
 ClusterRole, granting that access across every namespace.
+
+Both custom resource names are limited to 63 characters so generated objects
+can carry the full CR name in their `k8s.pliu.dev/owner-name` label.
 
 ClusterRoles are not managed by this operator. A mapping may reference any
 existing ClusterRole; the reusable ones you intend to grant should be installed
@@ -75,6 +83,8 @@ system namespace makes the API server reject pods that omit resource requests,
 which can keep cluster components from scheduling; since those quotas are
 retained when the `ManagedNamespace` is deleted, backing that out means
 deleting the ResourceQuotas by hand.
+
+Local verification requires Go and Node.js (for the viewer tests).
 
 ```sh
 make verify

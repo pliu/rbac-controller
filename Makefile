@@ -1,9 +1,11 @@
 .PHONY: test verify generate manifests install kind-test
 test:
 	go test ./...
+	node --test internal/server/ui_test.js
 verify:
 	gofmt -w $$(find api cmd internal -name '*.go')
 	go test ./...
+	node --test internal/server/ui_test.js
 	go vet ./...
 	git diff --check
 generate:

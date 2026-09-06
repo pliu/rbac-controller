@@ -79,6 +79,7 @@ type ManagedNamespaceStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=mns
 // +kubebuilder:subresource:status
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be at most 63 characters"
 type ManagedNamespace struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -105,6 +106,7 @@ type ClusterAccessMappingStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=cam
 // +kubebuilder:subresource:status
+// +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must be at most 63 characters"
 type ClusterAccessMapping struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

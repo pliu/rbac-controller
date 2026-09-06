@@ -48,12 +48,12 @@ func (r *ClusterAccessReconciler) Reconcile(ctx context.Context, q ctrl.Request)
 		invalidReferences.DeleteLabelValues("clusteraccessmapping", cam.Name)
 		base := cam.DeepCopy()
 		controllerutil.RemoveFinalizer(&cam, core.Finalizer)
-		return ctrl.Result{}, r.CachedClient.Patch(ctx, &cam, client.MergeFrom(base))
+		return ctrl.Result{}, r.CachedClient.Patch(ctx, &cam, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	}
 	if !controllerutil.ContainsFinalizer(&cam, core.Finalizer) {
 		base := cam.DeepCopy()
 		controllerutil.AddFinalizer(&cam, core.Finalizer)
-		return ctrl.Result{Requeue: true}, r.CachedClient.Patch(ctx, &cam, client.MergeFrom(base))
+		return ctrl.Result{Requeue: true}, r.CachedClient.Patch(ctx, &cam, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	}
 
 	invalid, syncErr := r.sync(ctx, &cam)

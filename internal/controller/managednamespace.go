@@ -58,12 +58,12 @@ func (r *ManagedNamespaceReconciler) Reconcile(ctx context.Context, q ctrl.Reque
 		invalidReferences.DeleteLabelValues("managednamespace", mns.Name)
 		base := mns.DeepCopy()
 		controllerutil.RemoveFinalizer(&mns, core.Finalizer)
-		return ctrl.Result{}, r.CachedClient.Patch(ctx, &mns, client.MergeFrom(base))
+		return ctrl.Result{}, r.CachedClient.Patch(ctx, &mns, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	}
 	if !controllerutil.ContainsFinalizer(&mns, core.Finalizer) {
 		base := mns.DeepCopy()
 		controllerutil.AddFinalizer(&mns, core.Finalizer)
-		return ctrl.Result{Requeue: true}, r.CachedClient.Patch(ctx, &mns, client.MergeFrom(base))
+		return ctrl.Result{Requeue: true}, r.CachedClient.Patch(ctx, &mns, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	}
 
 	invalid, syncErr := r.sync(ctx, &mns)
@@ -100,6 +100,23 @@ func (r *ManagedNamespaceReconciler) finalizeBindings(ctx context.Context, mns *
 }
 
 func (r *ManagedNamespaceReconciler) sync(ctx context.Context, mns *api.ManagedNamespace) ([]api.InvalidReference, error) {
+	// Revoke grants removed from the spec before any unrelated reads or writes
+	// can fail. Derive this set without resolving ClusterRoles: a lookup error
+	// must neither block revocation nor remove a grant still requested by spec.
+	want := map[types.NamespacedName]bool{}
+	for _, am := range mns.Spec.AccessMappings {
+		if am.Group == "" && len(am.Users) == 0 {
+			continue
+		}
+		key := subjectKey(am)
+		for _, role := range am.ClusterRoles {
+			name := core.BindingName(mns.Name, key, role)
+			want[types.NamespacedName{Namespace: mns.Name, Name: name}] = true
+		}
+	}
+	if e := r.pruneBindings(ctx, mns, want); e != nil {
+		return nil, e
+	}
 	if e := r.ensureNamespace(ctx, mns); e != nil {
 		return nil, e
 	}
@@ -251,6 +268,8 @@ func (r *ManagedNamespaceReconciler) reconcileBindings(ctx context.Context, mns 
 			want[types.NamespacedName{Namespace: mns.Name, Name: name}] = true
 		}
 	}
+	// Also clear bindings whose ClusterRoles were found missing during this
+	// pass; the initial prune only handles grants removed from the spec.
 	if e := r.pruneBindings(ctx, mns, want); e != nil {
 		return nil, e
 	}

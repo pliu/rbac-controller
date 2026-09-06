@@ -70,7 +70,7 @@ function readyCondition(o) {
 
 // invalidRoles maps each unresolved ClusterRole name to why it failed.
 function invalidRoles(o) {
-  var out = {};
+  var out = Object.create(null);
   ((o.status && o.status.invalidReferences) || []).forEach(function (r) {
     if (r.clusterRole) out[r.clusterRole] = r.reason || 'invalid reference';
   });
@@ -135,7 +135,7 @@ function statusBlock(o) {
 function subjectCells(m, invalid) {
   var kind = m.group ? 'Group' : 'User';
   var subject = m.group ? m.group : (m.users || []).join(', ');
-  return [subject, kind, rolesCell(m.clusterRoles, invalid || {})];
+  return [subject, kind, rolesCell(m.clusterRoles, invalid || Object.create(null))];
 }
 
 function renderList() {
@@ -224,7 +224,7 @@ function renderCluster() {
 // match returns the union of ClusterRoles the query is granted by the given
 // mappings, plus how it matched (user and/or group).
 function match(ms, q) {
-  var roles = {}, kinds = {};
+  var roles = Object.create(null), kinds = Object.create(null);
   ms.forEach(function (m) {
     var hit = false;
     if (m.group && m.group === q) { hit = true; kinds.group = true; }

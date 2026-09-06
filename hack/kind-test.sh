@@ -15,6 +15,25 @@ docker build -t "$image" .
 kind load docker-image "$image" --name "$cluster"
 kubectl apply -k config
 kubectl -n k8s-controller rollout status deployment/k8s-controller --timeout=120s
+
+# Exercise CRD admission against a real API server: the longest supported name
+# must pass and the next character must fail with the name-length rule.
+name63=$(printf 'n%.0s' {1..63})
+for cr_kind in ManagedNamespace ClusterAccessMapping; do
+  cr_spec='{}'
+  if [ "$cr_kind" = ClusterAccessMapping ]; then
+    cr_spec='{"group":"devs","clusterRoles":["view"]}'
+  fi
+  printf '{"apiVersion":"k8s.pliu.dev/v1alpha1","kind":"%s","metadata":{"name":"%s"},"spec":%s}\n' \
+    "$cr_kind" "$name63" "$cr_spec" | kubectl create --dry-run=server -f - >/dev/null
+  if rejection=$(printf '{"apiVersion":"k8s.pliu.dev/v1alpha1","kind":"%s","metadata":{"name":"%sx"},"spec":%s}\n' \
+    "$cr_kind" "$name63" "$cr_spec" | kubectl create --dry-run=server -f - 2>&1); then
+    echo "$cr_kind accepted a 64-character name" >&2
+    exit 1
+  fi
+  [[ "$rejection" == *"metadata.name must be at most 63 characters"* ]]
+done
+
 kubectl apply -f config/sample.yaml
 
 # The operator creates the namespace, its ResourceQuotas, and the RoleBindings for
@@ -68,6 +87,20 @@ for server_ip in $(kubectl -n k8s-controller get pod -l app=k8s-controller \
 done
 grep -q controller_runtime_reconcile_total <<<"$metrics"
 grep -q k8s_controller_http_requests_total <<<"$metrics"
+
+# A quota rejected by the API server must not keep a removed user's grant live.
+kubectl auth can-i list pods --as=alice@example.com -n team-a | grep -qx yes
+kubectl patch managednamespace team-a --type=merge \
+  -p '{"spec":{"accessMappings":[],"resourceQuotas":[{"name":"compute","hard":{"pods":"-1"}}]}}'
+kubectl wait managednamespace/team-a \
+  --for='jsonpath={.status.conditions[?(@.type=="Ready")].reason}=SyncFailed' --timeout=60s
+for _ in {1..30}; do
+  remaining=$(kubectl -n team-a get rolebinding -l "k8s.pliu.dev/owner-name=team-a" -o name)
+  [ -z "$remaining" ] && break
+  sleep 1
+done
+[ -z "$remaining" ]
+! kubectl auth can-i list pods --as=alice@example.com -n team-a
 
 # An ordinary ManagedNamespace retains its Namespace when it is deleted.
 kubectl delete managednamespace team-a --wait=true --timeout=60s
